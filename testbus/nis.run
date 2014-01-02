@@ -1,0 +1,11 @@
+#!/bin/bash
+
+basedir=${0%/*}
+
+image=$1
+
+testbus-control-kvm start server $image
+testbus-control-kvm start client $image
+$basedir/nis
+testbus-control-kvm stop server
+testbus-control-kvm stop client
