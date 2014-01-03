@@ -251,6 +251,8 @@ echo "broadcast" |
 	testbus_upload_file $NIS_CLIENT - /etc/yp.conf
 if run_client /etc/init.d/ypbind restart; then
 	nis_verify_binding $NIS_SERVER_IP
+else
+	run_client /usr/bin/systemctl status ypbind.service
 fi
 
 testbus_exit
