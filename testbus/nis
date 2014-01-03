@@ -46,6 +46,29 @@ function run_server {
 }
 
 ##################################################################
+# Helper functions. When these accumulate, we should put them
+# into a separate file (nis.functions)
+##################################################################
+function nis_verify_binding {
+
+	local expected actual
+
+	expected=$1
+
+	testbus_trace "client: verify binding"
+	actual=`run_client /usr/bin/ypwhich`
+	if [ -z "$actual" ]; then
+		testbus_test_failure "yp client not bound (should be bound to $expected)"
+	elif [ "$actual" != $expected ]; then
+		testbus_test_failure "yp client should be bound to $expected, but bound to $actual instead"
+	else
+		return 0
+	fi
+
+	return 1
+}
+
+##################################################################
 # Start testing
 ##################################################################
 testbus_group_begin $0
@@ -125,11 +148,7 @@ EOF
 testbus_trace "client: starting ypbind"
 run_client /etc/init.d/ypbind restart
 
-testbus_trace "client: verify binding"
-bound_to=`run_client /usr/bin/ypwhich`
-if [ -z "$bound_to" -o "$bound_to" != $NIS_SERVER_IP ]; then
-	testbus_test_failure "yp client should be bound to $NIS_SERVER_IP, but bound to $bound_to instead"
-fi
+nis_verify_binding $NIS_SERVER_IP
 
 ##################################################################
 # Try NIS host resolution
@@ -222,5 +241,16 @@ run_client /usr/bin/ypmatch $USERNAME passwd.byname >/dev/null 2>&1 ||
 	testbus_test_failure "User $USERNAME still in NIS maps after deleting it"
 run_client /usr/bin/ypmatch $USERUID passwd.byuid >/dev/null ||
 	testbus_test_failure "User ID $USERUID still in NIS maps after deleting it"
+
+##################################################################
+# Try binding by broadcast
+##################################################################
+testbus_test_begin nis-broadcast
+
+echo "broadcast" |
+	testbus_upload_file $NIS_CLIENT - /etc/yp.conf
+if run_client /etc/init.d/ypbind restart; then
+	nis_verify_binding $NIS_SERVER_IP
+fi
 
 testbus_exit
