@@ -16,141 +16,15 @@ USE_YAST=true
 # TESTBUS_SELFTEST_DEBUG=all
 
 . /usr/share/testbus/functions
+. $0.functions
 
-TMPDIR=/tmp/testbus-yp
+TMPDIR=/tmp/testbus-nis
 mkdir -p $TMPDIR
 
 # Override the timeout for claiming the host.
 # Bringing up a VM guest can take some time, especially if it goes
 # through a firstboot stage first.
 TESTBUS_CLAIM_TIMEOUT=240
-
-function __run_client {
-	testbus_run_command --host $NIS_CLIENT "$@"
-}
-
-function run_client {
-	__run_client "$@" || testbus_test_failure
-}
-
-function run_client_script {
-	run_client --host $NIS_CLIENT --send-script "$@"
-}
-
-function __run_server {
-	testbus_run_command --host $NIS_SERVER "$@"
-}
-
-function run_server {
-	__run_server "$@" || testbus_test_failure
-}
-
-##################################################################
-# Helper functions. When these accumulate, we should put them
-# into a separate file (nis.functions)
-##################################################################
-function nis_verify_binding {
-
-	local expected actual
-
-	expected=$1
-
-	testbus_trace "client: verify binding"
-	actual=`run_client /usr/bin/ypwhich`
-	if [ -z "$actual" ]; then
-		testbus_test_failure "yp client not bound (should be bound to $expected)"
-	elif [ "$actual" != $expected ]; then
-		testbus_test_failure "yp client should be bound to $expected, but bound to $actual instead"
-	else
-		return 0
-	fi
-
-	return 1
-}
-
-function nis_verify_ypcat {
-
-	local testname mapname testname result
-
-	testname=$1
-	mapname=$2
-
-	testbus_test_begin "$testname"
-	result=`__run_client /usr/bin/ypcat $mapname`
-	if [ $? -ne 0 ]; then
-		testbus_test_failure "ypcat $mapname failed"
-		if [ -n "$result" ]; then
-			echo "Command output:"
-			echo $result
-		fi >&2
-		return 1;
-	fi
-
-	if [ -z "$result" ]; then
-		testbus_test_failure "ypcat $mapname returned an empty map"
-		return 1;
-	fi
-
-	return 0;
-}
-
-function nis_verify_ypmatch {
-
-	local testname key mapname expected exitval result
-
-	testname=$1
-	key=$2
-	mapname=$3
-	expected=${4:-notempty}
-
-	testbus_test_begin "$testname"
-
-	result=`__run_client /usr/bin/ypmatch $key $mapname`
-	exitval=$?
-
-	if [ "$expected" = "fail" ]; then
-		if [ "$exitval" -ne 0 ]; then
-			testbus_trace "Command returned error (as expected): exit code $exitval"
-			return 0
-		fi
-		testbus_test_failure "ypmatch $key $mapname should have failed, but succeeded"
-		if [ -n "$result" ]; then
-			echo "Command output:"
-			echo $result
-		fi >&2
-		return 1;
-	fi
-
-	if [ $exitval -ne 0 ]; then
-		testbus_test_failure "ypmatch $key $mapname failed"
-		if [ -n "$result" ]; then
-			echo "Command output:"
-			echo $result
-		fi >&2
-		return 1;
-	fi
-
-	if [ "$expected" = "notempty" ]; then
-		if [ -z "$result" ]; then
-			testbus_test_failure "ypmatch $key $mapname returns nothing"
-			return 1;
-		fi
-	else
-		case $result in
-		*"$expected"*)
-			: ;;
-		*)
-			testbus_test_failure "ypmatch $key $mapname did not return expected value"
-			echo "Expected: <<$expected>>"
-			echo "Received:"
-			echo $result
-			return 1;;
-		esac >&2
-	fi
-
-
-	return 0;
-}
 
 ##################################################################
 # Start testing
@@ -178,7 +52,7 @@ EOF
 ##################################################################
 # Initialize NIS server
 ##################################################################
-testbus_test_begin server-init
+testbus_group_begin server-init
 
 testbus_trace "server: setting up NIS server"
 
@@ -186,20 +60,31 @@ testbus_trace "server: setting up NIS server"
 # wants _at least_ a pipe on stdout, preferably a tty. If you make it
 # write to anything else, it'll just die quietly.
 if $USE_YAST; then
-	run_server --use-terminal /sbin/yast2 nis-server master domain=$NISDOMAIN yppasswd=yes verbose
+	testbus_test_begin yastconfig
+	nis_run_server --use-terminal /sbin/yast2 nis-server master domain=$NISDOMAIN yppasswd=yes verbose
 else
+	testbus_test_begin config
+
 	testbus_trace "server: setting nis domain to $NISDOMAIN"
-	run_server /bin/domainname $NISDOMAIN
+	nis_run_server /bin/domainname $NISDOMAIN
 
 	testbus_trace "server: building default NIS maps"
-	run_server /usr/bin/make -C /var/yp
+	nis_run_server /usr/bin/make -C /var/yp
 
 	testbus_trace "server: starting ypserv"
-	run_server /etc/init.d/ypserv start
+	nis_run_server /etc/init.d/ypserv start
 
 	testbus_trace "server: starting yppasswdd"
-	run_server /etc/init.d/yppasswdd start
+	nis_run_server /etc/init.d/yppasswdd start
 fi
+
+testbus_test_begin verify-ypserv
+nis_run_server /sbin/rpcinfo -u localhost ypserv
+
+testbus_test_begin verify-yppasswdd
+nis_run_server /sbin/rpcinfo -u localhost yppasswdd
+
+testbus_group_finish
 
 ##################################################################
 # Initialize NIS client
@@ -208,31 +93,39 @@ testbus_group_begin client-init
 
 if $USE_YAST; then
 	testbus_test_begin yastconfig
-	run_client --use-terminal /sbin/yast2 nis enable
-	run_client --use-terminal /sbin/yast2 nis configure domain=$NISDOMAIN server="$NIS_SERVER_IP"
-	run_client --use-terminal /sbin/yast2 nis summary
+
+	# Very important caveat: We need to start rpcbind before enabling NIS.
+	# Otherwise, rpcbind will hang on startup (NIS domain already set,
+	# so getaddrinfo(3) will try to do a NIS query, and thus tries to ask
+	# rpcbind to resolve service names such as rpcbind. Bleah.
+	nis_run_client /usr/bin/systemctl enable rpcbind.service
+	nis_run_client /usr/bin/systemctl start rpcbind.service
+
+	nis_run_client --use-terminal /sbin/yast2 nis enable domain=$NISDOMAIN server="$NIS_SERVER_IP"
+	# nis_run_client --use-terminal /sbin/yast2 nis summary
 
 	testbus_test_begin check-domain
-	domain=`run_client /bin/domainname`
+	domain=`nis_run_client /bin/domainname`
 	if [ -z "$domain" -o "$domain" != "$NISDOMAIN" ]; then
 		testbus_test_failure "yast failed to set the domain name"
 
 		testbus_test_begin override-domain
-		run_client /bin/domainname $NISDOMAIN
+		nis_run_client /bin/domainname $NISDOMAIN
 	fi
 
 	testbus_trace "client: starting ypbind"
 	testbus_test_begin restart
-	run_client /etc/init.d/ypbind restart
-	run_client /usr/sbin/systemctl status ypbind.service
+	nis_run_client /etc/init.d/ypbind restart
+	nis_run_client /usr/bin/systemctl status ypbind.service
 else
 	testbus_trace "client: uploading config files"
+	testbus_test_begin config
 	echo $NISDOMAIN |
 		testbus_upload_file $NIS_CLIENT - /etc/defaultdomain
 	echo "domain $NISDOMAIN server $NIS_SERVER_IP" |
 		testbus_upload_file $NIS_CLIENT - /etc/yp.conf
 
-	run_client_script - <<-EOF
+	nis_run_client_script - <<-EOF
 	#!/bin/sh
 
 	if ! grep -qs '^+$' /etc/passwd; then
@@ -250,7 +143,7 @@ else
 EOF
 
 	testbus_trace "client: starting ypbind"
-	run_client /etc/init.d/ypbind restart
+	nis_run_client /etc/init.d/ypbind restart
 fi
 
 nis_verify_binding $NIS_SERVER_IP
@@ -264,27 +157,27 @@ testbus_test_begin nis-hosts
 
 # Change nsswitch.conf
 testbus_trace "configure client to use NIS for host lookups"
-run_client /bin/cp /etc/nsswitch.conf /etc/nsswitch.conf.save
+nis_run_client /bin/cp /etc/nsswitch.conf /etc/nsswitch.conf.save
 echo "hosts: files nis" |
 	testbus_upload_file $NIS_CLIENT - /etc/nsswitch.conf
 
 # On the server, generates the hosts.* maps
 testbus_trace "configuring server to generate hosts.* maps"
-run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile hosts
+nis_run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile hosts
 
 # Make sure ping in general works
 testbus_trace "verify name resolution"
-run_client /bin/ping -c 1 127.0.0.1
-run_client /bin/ping -c 1 $NIS_SERVER_IP
+nis_run_client /bin/ping -c 1 127.0.0.1
+nis_run_client /bin/ping -c 1 $NIS_SERVER_IP
 # Check that we can resolve the server's hostname
-run_client /bin/ping -c 1 $NIS_SERVER_NAME
+nis_run_client /bin/ping -c 1 $NIS_SERVER_NAME
 # Check that we can still resolve the client's hostname (which should be
 # in the hosts file)
-run_client /bin/ping -c 1 $NIS_CLIENT_NAME
+nis_run_client /bin/ping -c 1 $NIS_CLIENT_NAME
 
 # Restore nsswitch.conf
 testbus_trace "client side cleanup"
-run_client /bin/mv /etc/nsswitch.conf.save /etc/nsswitch.conf
+nis_run_client /bin/mv /etc/nsswitch.conf.save /etc/nsswitch.conf
 
 ##################################################################
 # Try NIS user name resolution
@@ -298,7 +191,7 @@ testbus_group_begin nis-users
 # On the server, generates the hosts.* maps
 testbus_test_begin "mapgen"
 testbus_trace "configuring server to generate passwd.* maps"
-run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd group
+nis_run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd group
 testbus_test_success
 
 ##################################################################
@@ -320,17 +213,17 @@ NEWUSERPASS="S0eL1te!"
 
 testbus_test_begin "system-add"
 if $USE_YAST; then
-	run_server --use-terminal /sbin/yast2 users add username=$USERNAME uid=$USERUID password=$USERPASS no_home
+	nis_run_server --use-terminal /sbin/yast2 users add username=$USERNAME uid=$USERUID password=$USERPASS no_home
 else
 	HASHPASS=`mkpasswd -m sha-256 $USERPASS`
-	run_server /usr/sbin/useradd --uid $USERUID --password $HASHPASS $USERNAME
+	nis_run_server /usr/sbin/useradd --uid $USERUID --password $HASHPASS $USERNAME
 fi
 
 # Even Yast does not rebuild the maps automatically
 if ! nis_verify_ypmatch "verify-added" $USERNAME passwd.byname; then
 	testbus_trace "useradd did not automatically rebuild NIS maps, tsk tsk tsk"
 	testbus_test_begin "rebuild-maps"
-	run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
+	nis_run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
 fi
 
 testbus_group_finish
@@ -341,19 +234,19 @@ nis_verify_ypmatch "verify-uid"  $USERUID  passwd.byuid
 
 # Try nsswitch lookup
 testbus_test_begin "id"
-run_client /usr/bin/id $USERNAME
+nis_run_client /usr/bin/id $USERNAME
 
 testbus_test_begin "groups"
-run_client /usr/bin/groups $USERNAME
+nis_run_client /usr/bin/groups $USERNAME
 
 # Try to authenticate via PAM
 testbus_test_begin "pam-authenticate"
-run_client /bin/pam-test --debug --pam-service login --username testbus --password $USERPASS authenticate
+nis_run_client /bin/pam-test --debug --pam-service login --username testbus --password $USERPASS authenticate
 
 # Try to change the password
 # This seems to be buggy in openSUSE right now
 testbus_test_begin "pam-chauthtok"
-run_client /bin/pam-test --debug --pam-service passwd --username testbus --old-password $USERPASS --new-password "$NEWUSERPASS" chauthtok authenticate
+nis_run_client /bin/pam-test --debug --pam-service passwd --username testbus --old-password $USERPASS --new-password "$NEWUSERPASS" chauthtok authenticate
 
 # Now delete the account
 ##################################################################
@@ -361,17 +254,17 @@ testbus_group_begin "deluser"
 
 testbus_test_begin "system-del"
 if $USE_YAST; then
-	run_server --use-terminal /sbin/yast2 users delete username=$USERNAME
+	nis_run_server --use-terminal /sbin/yast2 users delete username=$USERNAME
 else
-	run_server /usr/bin/userdel $USERNAME
-	run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
+	nis_run_server /usr/bin/userdel $USERNAME
+	nis_run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
 fi
 
 # Even Yast does not rebuild the maps automatically
-if ! nis_verify_ypmatch "verify-added" $USERNAME passwd.byname fail; then
+if ! nis_verify_ypmatch "verify-removed" $USERNAME passwd.byname fail; then
 	testbus_trace "useradd did not automatically rebuild NIS maps, tsk tsk tsk"
 	testbus_test_begin "rebuild-maps"
-	run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
+	nis_run_server /usr/bin/make -C /var/yp/$NISDOMAIN -f /var/yp/Makefile passwd
 fi
 
 testbus_group_finish
@@ -390,10 +283,10 @@ testbus_group_begin nis-broadcast
 testbus_test_begin rebind
 echo "broadcast" |
 	testbus_upload_file $NIS_CLIENT - /etc/yp.conf
-if run_client /etc/init.d/ypbind restart; then
+if nis_run_client /etc/init.d/ypbind restart; then
 	nis_verify_binding $NIS_SERVER_IP
 else
-	run_client /usr/bin/systemctl status ypbind.service
+	nis_run_client /usr/bin/systemctl status ypbind.service
 fi
 
 testbus_exit

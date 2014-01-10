@@ -1,0 +1,131 @@
+#
+# Helper functions for NIS testbus suite
+#
+
+function __nis_run_client {
+	testbus_run_command --host $NIS_CLIENT "$@"
+}
+
+function nis_run_client {
+	__nis_run_client "$@" || testbus_test_failure
+}
+
+function nis_run_client_script {
+	nis_run_client --host $NIS_CLIENT --send-script "$@"
+}
+
+function __nis_run_server {
+	testbus_run_command --host $NIS_SERVER "$@"
+}
+
+function nis_run_server {
+	__nis_run_server "$@" || testbus_test_failure
+}
+
+##################################################################
+# Helper functions. When these accumulate, we should put them
+# into a separate file (nis.functions)
+##################################################################
+function nis_verify_binding {
+
+	local expected actual
+
+	expected=$1
+
+	testbus_trace "client: verify binding"
+	actual=`nis_run_client /usr/bin/ypwhich`
+	if [ -z "$actual" ]; then
+		testbus_test_failure "yp client not bound (should be bound to $expected)"
+	elif [ "$actual" != $expected ]; then
+		testbus_test_failure "yp client should be bound to $expected, but bound to $actual instead"
+	else
+		return 0
+	fi
+
+	return 1
+}
+
+function nis_verify_ypcat {
+
+	local testname mapname testname result
+
+	testname=$1
+	mapname=$2
+
+	testbus_test_begin "$testname"
+	result=`__nis_run_client /usr/bin/ypcat $mapname`
+	if [ $? -ne 0 ]; then
+		testbus_test_failure "ypcat $mapname failed"
+		if [ -n "$result" ]; then
+			echo "Command output:"
+			echo $result
+		fi >&2
+		return 1;
+	fi
+
+	if [ -z "$result" ]; then
+		testbus_test_failure "ypcat $mapname returned an empty map"
+		return 1;
+	fi
+
+	return 0;
+}
+
+function nis_verify_ypmatch {
+
+	local testname key mapname expected exitval result
+
+	testname=$1
+	key=$2
+	mapname=$3
+	expected=${4:-notempty}
+
+	testbus_test_begin "$testname"
+
+	result=`__nis_run_client /usr/bin/ypmatch $key $mapname`
+	exitval=$?
+
+	if [ "$expected" = "fail" ]; then
+		if [ "$exitval" -ne 0 ]; then
+			testbus_trace "Command returned error (as expected): exit code $exitval"
+			return 0
+		fi
+		testbus_test_failure "ypmatch $key $mapname should have failed, but succeeded"
+		if [ -n "$result" ]; then
+			echo "Command output:"
+			echo $result
+		fi >&2
+		return 1;
+	fi
+
+	if [ $exitval -ne 0 ]; then
+		testbus_test_failure "ypmatch $key $mapname failed"
+		if [ -n "$result" ]; then
+			echo "Command output:"
+			echo $result
+		fi >&2
+		return 1;
+	fi
+
+	if [ "$expected" = "notempty" ]; then
+		if [ -z "$result" ]; then
+			testbus_test_failure "ypmatch $key $mapname returns nothing"
+			return 1;
+		fi
+	else
+		case $result in
+		*"$expected"*)
+			: ;;
+		*)
+			testbus_test_failure "ypmatch $key $mapname did not return expected value"
+			echo "Expected: <<$expected>>"
+			echo "Received:"
+			echo $result
+			return 1;;
+		esac >&2
+	fi
+
+
+	return 0;
+}
+
