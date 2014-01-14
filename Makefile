@@ -5,7 +5,8 @@ testdir	= /usr/share/testbus/suites
 CFLAGS	= -Wall -O2
 APPS	= 
 SCRIPTS	= testbus/nis \
-	  testbus/nis.run
+	  testbus/nis.functions \
+	  testbus/nis.conf
 
 all: $(APPS)
 
