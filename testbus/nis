@@ -289,4 +289,11 @@ else
 	nis_run_client /usr/bin/systemctl status ypbind.service
 fi
 
+##################################################################
+# Try restarting rpcbind. This should not hang
+##################################################################
+testbus_test_begin restart-rpcbind
+testbus_trace "Restarting rpcbind - if this times out, rpcbind gets stuck in NIS calls (which it should avoid)"
+nis_run_client --timeout 30 /usr/bin/systemctl restart rpcbind.service
+
 testbus_exit
