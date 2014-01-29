@@ -2,24 +2,24 @@
 # Helper functions for NIS testbus suite
 #
 
-function __nis_run_client {
-	testbus_run_command --host $NIS_CLIENT "$@"
+function __nis_run {
+	testbus_node_run "$@"
 }
 
-function nis_run_client {
-	__nis_run_client "$@" || testbus_test_failure
+function nis_run {
+	if ! testbus_node_run "$@"; then
+		local node
+
+		node=$1; shift
+		testbus_test_failure "Error running command on node <$node>: $*"
+		return 1
+	fi
+	return 0
 }
 
-function nis_run_client_script {
-	nis_run_client --host $NIS_CLIENT --send-script "$@"
-}
+function nis_run_script {
 
-function __nis_run_server {
-	testbus_run_command --host $NIS_SERVER "$@"
-}
-
-function nis_run_server {
-	__nis_run_server "$@" || testbus_test_failure
+	nis_run --send-script "$@"
 }
 
 ##################################################################
@@ -33,7 +33,7 @@ function nis_verify_binding {
 	expected=$1
 
 	testbus_trace "client: verify binding"
-	actual=`nis_run_client /usr/bin/ypwhich`
+	actual=`nis_run client /usr/bin/ypwhich`
 	if [ -z "$actual" ]; then
 		testbus_test_failure "yp client not bound (should be bound to $expected)"
 	elif [ "$actual" != $expected ]; then
@@ -53,7 +53,7 @@ function nis_verify_ypcat {
 	mapname=$2
 
 	testbus_test_begin "$testname"
-	result=`__nis_run_client /usr/bin/ypcat $mapname`
+	result=`__nis_run client /usr/bin/ypcat $mapname`
 	if [ $? -ne 0 ]; then
 		testbus_test_failure "ypcat $mapname failed"
 		if [ -n "$result" ]; then
@@ -82,7 +82,7 @@ function nis_verify_ypmatch {
 
 	testbus_test_begin "$testname"
 
-	result=`__nis_run_client /usr/bin/ypmatch $key $mapname`
+	result=`__nis_run client /usr/bin/ypmatch $key $mapname`
 	exitval=$?
 
 	if [ "$expected" = "fail" ]; then
